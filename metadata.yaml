@@ -1,0 +1,8 @@
+name: astrbot_plugin_resetpro
+display_name: ResetPro
+desc: 一键清空 AstrBot 全部会话上下文的管理插件。
+short_desc: 管理员使用 /resetpro 清空所有会话上下文。
+version: v1.0.0
+author: yun474
+repo: https://github.com/yun474/astrbot_plugin_resetpro
+astrbot_version: ">=4.17.0"

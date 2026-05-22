@@ -1,0 +1,14 @@
+{
+  "admin_ids": {
+    "description": "ResetPro 管理员 QQ 号",
+    "type": "list",
+    "hint": "填写允许使用 /resetpro 的 QQ 号。只写 QQ 号即可；插件也兼容逗号或换行分隔的文本。",
+    "default": []
+  },
+  "use_astrbot_admins": {
+    "description": "使用 AstrBot 全局管理员",
+    "type": "bool",
+    "hint": "开启后，AstrBot 配置里的管理员也可以使用 /resetpro。关闭后只有上面的 QQ 号列表可用。",
+    "default": true
+  }
+}
