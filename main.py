@@ -1,46 +1,57 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
-from typing import Any
+import time
 
-from astrbot.api import AstrBotConfig, logger, sp
+from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star, register
-from astrbot.core.utils.active_event_registry import active_event_registry
 
-
-CONVERSATION_PAGE_SIZE = 100
-THIRD_PARTY_AGENT_STATE_KEYS = (
-    "dify_conversation_id",
-    "coze_conversation_id",
-    "dashscope_conversation_id",
-    "deerflow_thread_id",
+from .core.auth import is_authorized
+from .core.conversation_ops import (
+    clear_third_party_agent_state,
+    collect_session_ids,
+    get_all_conversations,
+    stop_active_events,
 )
+from .core.idle_cleaner import ACTION_COMPRESS, IdleCleaner
 
 
 @register(
     "astrbot_plugin_resetpro",
     "yun474",
-    "One-command reset for every AstrBot conversation context.",
-    "1.0.0",
+    "一键清空全部会话上下文，并可自动整理闲置会话。",
+    "1.1.0",
+    "https://github.com/yun474/astrbot_plugin_resetpro",
 )
 class ResetProPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
         self.config = config
+        self.idle_cleaner = IdleCleaner(
+            context, lambda: self.config.get("idle_cleanup", {})
+        )
+
+    async def initialize(self) -> None:
+        self.idle_cleaner.start()
+
+    async def terminate(self) -> None:
+        await self.idle_cleaner.stop()
+
+    def _deny_message(self, event: AstrMessageEvent) -> str:
+        sender_id = event.get_sender_id() or "unknown"
+        return f"主人，ResetPro 只给管理员用喔。当前 ID: {sender_id}"
 
     @filter.command("resetpro")
     async def resetpro(self, event: AstrMessageEvent):
-        """Clear all stored conversation contexts."""
-        if not self._is_authorized(event):
-            sender_id = event.get_sender_id() or "unknown"
-            yield event.plain_result(
-                f"主人，ResetPro 只给管理员用喔。当前 ID: {sender_id}"
-            )
+        """清空全部会话的上下文。"""
+        if not is_authorized(self.config, event):
+            yield event.plain_result(self._deny_message(event))
             return
 
         try:
-            conversations = await self._get_all_conversations()
+            conversations = await get_all_conversations(
+                self.context.conversation_manager
+            )
         except Exception as exc:
             logger.exception("ResetPro failed to load conversations: %s", exc)
             yield event.plain_result(f"ResetPro 读取会话失败：{exc}")
@@ -50,9 +61,9 @@ class ResetProPlugin(Star):
             yield event.plain_result("ResetPro 没找到可清理的会话。")
             return
 
-        session_ids = self._collect_session_ids(conversations)
-        stopped_count = self._stop_active_events(session_ids, event)
-        await self._clear_third_party_agent_state(session_ids)
+        session_ids = collect_session_ids(conversations)
+        stopped_count = stop_active_events(session_ids, event)
+        await clear_third_party_agent_state(session_ids)
 
         cleared_count = 0
         failed_items: list[str] = []
@@ -81,7 +92,8 @@ class ResetProPlugin(Star):
                 )
                 failed_items.append(conversation_id)
 
-        event.set_extra("_clean_ltm_session", True)
+        # 通知内置插件清空当前会话的群聊上下文缓存
+        event.set_extra("_clean_group_context_session", True)
         result = (
             f"ResetPro 清理完成：已清空 {cleared_count} 个对话，"
             f"覆盖 {len(session_ids)} 个会话。"
@@ -95,92 +107,37 @@ class ResetProPlugin(Star):
 
         yield event.plain_result(result)
 
-    async def _get_all_conversations(self) -> list[Any]:
-        conversations: list[Any] = []
-        page = 1
-        while True:
-            batch = await self.context.conversation_manager.db.get_all_conversations(
-                page=page,
-                page_size=CONVERSATION_PAGE_SIZE,
-            )
-            conversations.extend(batch)
-            if len(batch) < CONVERSATION_PAGE_SIZE:
-                break
-            page += 1
-        return conversations
+    @filter.command("resetidle")
+    async def resetidle(self, event: AstrMessageEvent, action: str = ""):
+        """查看闲置整理状态；/resetidle run 立即巡检一次。"""
+        if not is_authorized(self.config, event):
+            yield event.plain_result(self._deny_message(event))
+            return
 
-    def _is_authorized(self, event: AstrMessageEvent) -> bool:
-        sender_id = str(event.get_sender_id() or "").strip()
-        if sender_id and sender_id in self._configured_admin_ids():
-            return True
-        if bool(self.config.get("use_astrbot_admins", True)) and event.is_admin():
-            return True
-        return False
+        if action == "run":
+            result = await self.idle_cleaner.scan(exclude=event)
+            yield event.plain_result(f"ResetPro 手动巡检完成：{result.summary()}")
+            return
 
-    def _configured_admin_ids(self) -> set[str]:
-        return self._normalize_ids(self.config.get("admin_ids", []))
-
-    @staticmethod
-    def _normalize_ids(raw_ids: Any) -> set[str]:
-        if raw_ids is None:
-            return set()
-
-        if isinstance(raw_ids, str):
-            raw_iterable: Iterable[Any] = (
-                raw_ids.replace("，", ",").replace("\n", ",").split(",")
-            )
-        elif isinstance(raw_ids, Iterable):
-            raw_iterable = raw_ids
+        settings = self.idle_cleaner.settings
+        action_text = "LLM 压缩" if settings.action == ACTION_COMPRESS else "清空"
+        scope_text = {"whitelist": "白名单", "blacklist": "黑名单"}.get(
+            settings.scope_mode, "全部会话"
+        )
+        if settings.scope_mode in ("whitelist", "blacklist"):
+            scope_text += f"（{len(settings.session_list)} 项）"
+        lines = [
+            f"闲置整理：{'已开启' if settings.enable else '未开启'}",
+            (
+                f"闲置 {settings.idle_minutes} 分钟后{action_text}，"
+                f"每 {settings.scan_interval_minutes} 分钟巡检一次"
+            ),
+            f"范围：{scope_text}",
+        ]
+        last = self.idle_cleaner.last_result
+        if last:
+            when = time.strftime("%m-%d %H:%M", time.localtime(last.finished_at))
+            lines.append(f"上次巡检（{when}）：{last.summary()}")
         else:
-            raw_iterable = [raw_ids]
-
-        return {str(raw_id).strip() for raw_id in raw_iterable if str(raw_id).strip()}
-
-    @staticmethod
-    def _collect_session_ids(conversations: list[Any]) -> list[str]:
-        session_ids: list[str] = []
-        seen: set[str] = set()
-        for conversation in conversations:
-            session_id = str(getattr(conversation, "user_id", "") or "")
-            if session_id and session_id not in seen:
-                session_ids.append(session_id)
-                seen.add(session_id)
-        return session_ids
-
-    @staticmethod
-    def _stop_active_events(
-        session_ids: list[str],
-        current_event: AstrMessageEvent,
-    ) -> int:
-        stopped_count = 0
-        for session_id in session_ids:
-            try:
-                stopped_count += active_event_registry.stop_all(
-                    session_id,
-                    exclude=current_event,
-                )
-            except Exception as exc:
-                logger.warning(
-                    "ResetPro failed to stop active events for %s: %s",
-                    session_id,
-                    exc,
-                )
-        return stopped_count
-
-    @staticmethod
-    async def _clear_third_party_agent_state(session_ids: list[str]) -> None:
-        for session_id in session_ids:
-            for key in THIRD_PARTY_AGENT_STATE_KEYS:
-                try:
-                    await sp.remove_async(
-                        scope="umo",
-                        scope_id=session_id,
-                        key=key,
-                    )
-                except Exception as exc:
-                    logger.warning(
-                        "ResetPro failed to clear %s for %s: %s",
-                        key,
-                        session_id,
-                        exc,
-                    )
+            lines.append("还没有巡检记录，可发送 /resetidle run 立即巡检。")
+        yield event.plain_result("\n".join(lines))

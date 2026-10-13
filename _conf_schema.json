@@ -2,13 +2,91 @@
   "admin_ids": {
     "description": "ResetPro 管理员 QQ 号",
     "type": "list",
-    "hint": "填写允许使用 /resetpro 的 QQ 号。只写 QQ 号即可；插件也兼容逗号或换行分隔的文本。",
+    "hint": "填写允许使用 /resetpro 和 /resetidle 的 QQ 号。只写 QQ 号即可；插件也兼容逗号或换行分隔的文本。",
     "default": []
   },
   "use_astrbot_admins": {
     "description": "使用 AstrBot 全局管理员",
     "type": "bool",
-    "hint": "开启后，AstrBot 配置里的管理员也可以使用 /resetpro。关闭后只有上面的 QQ 号列表可用。",
+    "hint": "开启后，AstrBot 配置里的管理员也可以使用 ResetPro 指令。关闭后只有上面的 QQ 号列表可用。",
     "default": true
+  },
+  "idle_cleanup": {
+    "description": "闲置会话自动整理",
+    "type": "object",
+    "hint": "会话在机器人最后一次回复后闲置超过设定时长，就自动清空或压缩它的上下文。仅对内置 Agent 生效。",
+    "items": {
+      "enable": {
+        "description": "启用闲置整理",
+        "type": "bool",
+        "default": false
+      },
+      "action": {
+        "description": "闲置后的动作",
+        "type": "string",
+        "options": ["clear", "compress"],
+        "labels": ["清空上下文", "LLM 压缩成摘要"],
+        "hint": "清空：效果同 /reset。压缩：用 LLM 把旧历史写成摘要并保留最近几轮原文，每次压缩会产生一次 LLM 调用。",
+        "default": "clear"
+      },
+      "idle_minutes": {
+        "description": "闲置时长（分钟）",
+        "type": "int",
+        "hint": "从机器人最后一次回复开始计算，最小 1。",
+        "default": 120
+      },
+      "scan_interval_minutes": {
+        "description": "巡检间隔（分钟）",
+        "type": "int",
+        "hint": "每隔多久检查一次闲置会话，最小 1。",
+        "default": 5
+      },
+      "only_current_conversation": {
+        "description": "只整理会话当前使用的对话",
+        "type": "bool",
+        "hint": "开启后，用户通过 /new 留下的旧对话不会被整理。",
+        "default": true
+      },
+      "scope_mode": {
+        "description": "整理范围",
+        "type": "string",
+        "options": ["all", "whitelist", "blacklist"],
+        "labels": ["全部会话", "仅名单内的会话", "名单外的会话"],
+        "default": "all"
+      },
+      "session_list": {
+        "description": "会话名单",
+        "type": "list",
+        "hint": "配合整理范围使用。可填完整会话 ID（如 aiocqhttp:GroupMessage:123456），也可只填群号或 QQ 号。",
+        "default": []
+      },
+      "max_per_scan": {
+        "description": "每轮最多处理数量",
+        "type": "int",
+        "hint": "单轮巡检最多整理多少个对话，超出的留到下一轮，避免短时间内大量调用 LLM。",
+        "default": 10
+      },
+      "min_rounds": {
+        "description": "压缩所需最少轮数",
+        "type": "int",
+        "hint": "仅压缩模式生效。对话轮数少于该值时不压缩。",
+        "default": 3
+      },
+      "compress_provider_id": {
+        "description": "压缩使用的模型",
+        "type": "string",
+        "_special": "select_provider",
+        "hint": "仅压缩模式生效。留空时依次使用会话配置中的压缩模型、会话的对话模型。",
+        "default": ""
+      },
+      "on_compress_fail": {
+        "description": "压缩失败时",
+        "type": "string",
+        "options": ["skip", "clear"],
+        "labels": ["跳过，等有新消息后再试", "改为清空上下文"],
+        "hint": "仅压缩模式生效。",
+        "default": "skip"
+      }
+    }
   }
 }
